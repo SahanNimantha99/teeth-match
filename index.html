@@ -119,7 +119,8 @@ p{margin:.4em 0}
 .viewer{position:relative;max-width:100%;max-height:100%;border-radius:14px;overflow:hidden;outline:6px solid #33494D;transition:outline-color .2s;touch-action:none}
 .viewer.match{outline-color:#2FBF8F}.viewer.close{outline-color:#E39A4A}
 .viewer video,.viewer canvas{position:absolute;inset:0;width:100%;height:100%}
-.viewer video{object-fit:fill;background:#000;transform-origin:50% 50%}
+.viewer video{opacity:0}
+.viewer #live{background:#000}
 .guide{position:absolute;left:50%;bottom:6%;transform:translateX(-50%);font-size:clamp(76px,20vw,140px);line-height:1;font-weight:700;color:#fff;text-shadow:0 2px 14px rgba(0,0,0,.7);pointer-events:none}
 .intro{position:absolute;inset:0;display:grid;place-items:center;z-index:3;background:rgba(11,25,28,.82);text-align:center;padding:24px;cursor:pointer}
 .intro .k{color:var(--cam-muted);font-weight:700;text-transform:uppercase;letter-spacing:.06em;font-size:.9rem}
@@ -211,6 +212,7 @@ p{margin:.4em 0}
   <div class="stagebox" id="stagebox">
     <div class="viewer" id="viewer">
       <video id="video" playsinline muted autoplay></video>
+      <canvas id="live"></canvas>
       <canvas id="ghost"></canvas>
       <canvas id="hud"></canvas>
       <div class="guide" id="guide" aria-hidden="true"></div>
@@ -755,6 +757,7 @@ async function startStream() {
     track = stream.getVideoTracks()[0];
     const v = $("video"); v.srcObject = stream; await v.play().catch(() => {});
     await new Promise(r => v.videoWidth ? r() : v.addEventListener("loadedmetadata", r, { once: true }));
+    requestAnimationFrame(() => drawLive(stream));
     const caps = track.getCapabilities ? track.getCapabilities() : {};
     $("torchBtn").hidden = !caps.torch;
     if (caps.zoom && caps.zoom.max > caps.zoom.min) Object.assign(zoom, { mode: "hardware", min: caps.zoom.min, max: Math.min(caps.zoom.max, 8), step: caps.zoom.step || 0.1 });
@@ -769,14 +772,31 @@ let zoomTimer = null;
 function setZoom(v) {
   v = Math.max(zoom.min, Math.min(zoom.max, +v || 1)); zoom.value = v;
   $("zoomSlider").value = v; $("zoomVal").textContent = v.toFixed(1) + "×";
-  const vid = $("video"); prevRaw = null;
-  if (zoom.mode === "hardware" && track) { vid.style.transform = ""; clearTimeout(zoomTimer); zoomTimer = setTimeout(() => track.applyConstraints({ advanced: [{ zoom: v }] }).catch(() => {}), 60); }
-  else vid.style.transform = `scale(${v})`;
+  prevRaw = null;
+  if (zoom.mode === "hardware" && track) { clearTimeout(zoomTimer); zoomTimer = setTimeout(() => track.applyConstraints({ advanced: [{ zoom: v }] }).catch(() => {}), 60); }
 }
+// The part of the camera frame that is shown, matched and saved. After dye it is cut to the
+// benchmark's shape, so a camera stream with a slightly different size still lines up.
 function cropRect() {
-  const v = $("video"), w = v.videoWidth, h = v.videoHeight;
-  if (zoom.mode === "hardware" || zoom.value <= 1) return { sx: 0, sy: 0, sw: w, sh: h };
-  const sw = w / zoom.value, sh = h / zoom.value; return { sx: (w - sw) / 2, sy: (h - sh) / 2, sw, sh };
+  const v = $("video"); let w = v.videoWidth, h = v.videoHeight, sx = 0, sy = 0;
+  if (ref && (w > h) === (ref.aspect > 1)) {
+    if (w / h > ref.aspect) { const nw = h * ref.aspect; sx = (w - nw) / 2; w = nw; }
+    else { const nh = w / ref.aspect; sy = (h - nh) / 2; h = nh; }
+  }
+  if (zoom.mode === "hardware" || zoom.value <= 1) return { sx, sy, sw: w, sh: h };
+  const sw = w / zoom.value, sh = h / zoom.value; return { sx: sx + (w - sw) / 2, sy: sy + (h - sh) / 2, sw, sh };
+}
+// Live view is drawn from the same crop that is matched, so the outline always sits on the real image.
+let liveAspect = 0;
+function drawLive(s) {
+  if ($("camera").hidden || !stream || s !== stream) return;   // one loop per camera stream
+  const v = $("video");
+  if (v.videoWidth && v.readyState >= 2) {
+    const cr = cropRect(), c = $("live");
+    if (Math.abs(cr.sw / cr.sh - liveAspect) > 0.001) layoutViewer();
+    c.getContext("2d").drawImage(v, cr.sx, cr.sy, cr.sw, cr.sh, 0, 0, c.width, c.height);
+  }
+  requestAnimationFrame(() => drawLive(s));
 }
 $("zoomSlider").oninput = e => setZoom(e.target.value);
 $("zoomIn").onclick = () => setZoom(zoom.value + (zoom.max - zoom.min) / 20);
@@ -788,10 +808,11 @@ $("viewer").addEventListener("pointermove", e => { if (!pts.has(e.pointerId)) re
 
 function layoutViewer() {
   const v = $("video"); if (!v.videoWidth) return;
-  const box = $("stagebox"), a = v.videoWidth / v.videoHeight, bw = box.clientWidth - 16, bh = box.clientHeight - 16;
+  const cr = cropRect(), box = $("stagebox"), a = cr.sw / cr.sh, bw = box.clientWidth - 16, bh = box.clientHeight - 16;
+  liveAspect = a; prevRaw = null;
   let w = bw, h = bw / a; if (h > bh) { h = bh; w = bh * a; }
   $("viewer").style.width = w + "px"; $("viewer").style.height = h + "px";
-  for (const id of ["ghost", "hud"]) { const c = $(id); c.width = Math.round(w * devicePixelRatio); c.height = Math.round(h * devicePixelRatio); }
+  for (const id of ["live", "ghost", "hud"]) { const c = $(id); c.width = Math.round(w * devicePixelRatio); c.height = Math.round(h * devicePixelRatio); }
   drawGhost();
 }
 window.addEventListener("resize", () => { if (!$("camera").hidden) layoutViewer(); if (!$("editor").hidden && ed) edDraw(); });
